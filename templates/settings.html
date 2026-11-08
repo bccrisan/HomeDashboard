@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Device Configuration</title>
+  <style>
+    :root { color-scheme: light; font-family: system-ui, sans-serif; color: #172033; background: #f3f6fb; }
+    body { margin: 0; }
+    main { max-width: 760px; margin: 0 auto; padding: 40px 24px; }
+    h1 { margin: 0; font-size: clamp(2rem, 5vw, 3rem); }
+    .intro, .back { color: #596579; }
+    .back { display: inline-block; margin-bottom: 20px; text-decoration: none; }
+    .sensor-list { display: grid; gap: 16px; margin: 24px 0; }
+    .sensor { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; padding: 20px; background: white; border: 1px solid #e1e7f0; border-radius: 14px; }
+    .section-heading { margin: 32px 0 8px; }
+    .section-intro { margin: 0; color: #596579; }
+    .monitored-device-list { display: grid; gap: 16px; margin: 18px 0 24px; }
+    .monitored-device { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; padding: 20px; background: white; border: 1px solid #e1e7f0; border-radius: 14px; }
+    label { display: grid; gap: 6px; color: #596579; font-size: .9rem; }
+    input, select { box-sizing: border-box; width: 100%; padding: 10px 12px; border: 1px solid #cbd4e1; border-radius: 8px; color: #172033; background: white; font: inherit; }
+    .relay-options { display: contents; }
+    .relay-options[hidden] { display: none; }
+    .relay-state-field[hidden], .pulse-duration-field[hidden] { display: none; }
+    .multi-relay-options { grid-column: 1 / -1; }
+    .multi-relay-options[hidden] { display: none; }
+    .channel-configs { display: grid; gap: 12px; }
+    .channel-config { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; min-width: 0; border: 1px solid #e1e7f0; border-radius: 10px; }
+    .channel-config legend { padding: 0 6px; color: #2457c5; font-weight: 600; }
+    .channel-config [hidden] { display: none; }
+    button { padding: 10px 14px; border: 0; border-radius: 8px; background: #2457c5; color: white; font: inherit; font-weight: 600; cursor: pointer; }
+    button:hover { background: #1c469f; }
+    .remove { align-self: end; background: #a4262c; }
+    .remove:hover { background: #851e23; }
+    .actions { display: flex; gap: 12px; flex-wrap: wrap; }
+    .section-actions { display: flex; gap: 12px; flex-wrap: wrap; margin: 12px 0 20px; }
+    .status { min-height: 1.5em; margin-top: 16px; color: #276749; }
+    .error { color: #a4262c; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back" href="/">&larr; Back to dashboard</a>
+    <h1>Device configuration</h1>
+    <p class="intro">Configure sensors and relay modules. Each relay channel can have its own mode, state, and pulse duration.</p>
+    <form id="config-form">
+      <h2 class="section-heading">Sensors and relay modules</h2>
+      <section id="sensor-list" class="sensor-list"></section>
+      <div class="section-actions">
+        <button id="add-sensor" type="button">Add device</button>
+        <button type="submit">Save configuration</button>
+      </div>
+      <h2 class="section-heading">Monitored devices</h2>
+      <p class="section-intro">Track whether local servers respond to ping or their configured HTTP URL. These devices are separate from sensors and relays.</p>
+      <section id="monitored-device-list" class="monitored-device-list"></section>
+      <div class="actions">
+        <button id="add-monitored-device" type="button">Add monitored server</button>
+        <button type="submit">Save configuration</button>
+      </div>
+    </form>
+    <p id="status" class="status" role="status" aria-live="polite"></p>
+  </main>
+  <script>
+    const sensorList = document.querySelector("#sensor-list");
+    const monitoredDeviceList = document.querySelector("#monitored-device-list");
+    const status = document.querySelector("#status");
+    let deviceTypes = [];
+
+    function addSensor(sensor = {}) {
+      const card = document.createElement("fieldset");
+      card.className = "sensor";
+      card.innerHTML = `
+        <label>Device type<select name="device_type" required></select></label>
+        <label>Device name<input name="name" required maxlength="100" value=""></label>
+        <label>Room name<input name="room_name" required maxlength="100" value=""></label>
+        <label>Local IP address<input name="local_ip_address" required inputmode="decimal" placeholder="192.168.1.101" value=""></label>
+        <div class="relay-options" hidden>
+          <label>Relay mode<select name="relay_mode"><option value="latching">Latching (ON/OFF)</option><option value="pulse">Pulse (automatic OFF)</option></select></label>
+          <label class="relay-state-field">Saved state<select name="relay_state"><option value="off">OFF</option><option value="on">ON</option></select></label>
+          <label class="pulse-duration-field">Pulse duration (ms)<input name="pulse_duration_ms" type="number" min="1" max="300000" step="1" value="1000"></label>
+          <input name="last_pressed_at" type="hidden" value="">
+        </div>
+        <div class="multi-relay-options" hidden>
+          <div class="channel-configs"></div>
+        </div>
+        <button class="remove" type="button">Remove</button>
+      `;
+      const typeSelect = card.querySelector('[name="device_type"]');
+      for (const type of deviceTypes) {
+        const option = document.createElement("option");
+        option.value = type.id;
+        option.textContent = type.label;
+        typeSelect.append(option);
+      }
+      typeSelect.value = sensor.device_type || "temperature_humidity";
+      const relayOptions = card.querySelector(".relay-options");
+      const multiRelayOptions = card.querySelector(".multi-relay-options");
+      const channelConfigsContainer = card.querySelector(".channel-configs");
+      const relayMode = card.querySelector('[name="relay_mode"]');
+      relayMode.value = sensor.relay_mode || "latching";
+      card.querySelector('[name="relay_state"]').value = sensor.relay_state || "off";
+      card.querySelector('[name="pulse_duration_ms"]').value =
+        sensor.pulse_duration_ms || 1000;
+      card.querySelector('[name="last_pressed_at"]').value =
+        sensor.last_pressed_at || "";
+      const channelConfigs = sensor.channels || [];
+      function createChannelConfig(channelNumber, pin, channel = {}) {
+        const fieldset = document.createElement("fieldset");
+        fieldset.className = "channel-config";
+        const legend = document.createElement("legend");
+        legend.textContent = `Channel ${channelNumber} (${pin})`;
+        fieldset.append(legend);
+
+        const modeSelect = document.createElement("select");
+        modeSelect.name = `channel_${channelNumber}_mode`;
+        for (const [value, label] of [
+          ["latching", "Latching (ON/OFF)"],
+          ["pulse", "Pulse (automatic OFF)"]
+        ]) {
+          const option = document.createElement("option");
+          option.value = value;
+          option.textContent = label;
+          modeSelect.append(option);
+        }
+        modeSelect.value = channel.relay_mode || "latching";
+        modeSelect.addEventListener("change", updateRelayOptions);
+        const modeLabel = document.createElement("label");
+        modeLabel.textContent = "Mode";
+        modeLabel.append(modeSelect);
+        fieldset.append(modeLabel);
+
+        const stateSelect = document.createElement("select");
+        stateSelect.name = `channel_${channelNumber}_state`;
+        for (const [value, label] of [["off", "OFF"], ["on", "ON"]]) {
+          const option = document.createElement("option");
+          option.value = value;
+          option.textContent = label;
+          stateSelect.append(option);
+        }
+        stateSelect.value = channel.relay_state || "off";
+        const stateLabel = document.createElement("label");
+        stateLabel.className = `channel-${channelNumber}-state-field`;
+        stateLabel.textContent = "Saved state";
+        stateLabel.append(stateSelect);
+        fieldset.append(stateLabel);
+
+        const durationInput = document.createElement("input");
+        durationInput.name = `channel_${channelNumber}_pulse_duration_ms`;
+        durationInput.type = "number";
+        durationInput.min = "1";
+        durationInput.max = "300000";
+        durationInput.step = "1";
+        durationInput.value = channel.pulse_duration_ms || 1000;
+        const durationLabel = document.createElement("label");
+        durationLabel.className = `channel-${channelNumber}-duration-field`;
+        durationLabel.textContent = "Pulse duration (ms)";
+        durationLabel.append(durationInput);
+        fieldset.append(durationLabel);
+
+        const lastPressed = document.createElement("input");
+        lastPressed.type = "hidden";
+        lastPressed.name = `channel_${channelNumber}_last_pressed_at`;
+        lastPressed.value = channel.last_pressed_at || "";
+        fieldset.append(lastPressed);
+        return fieldset;
+      }
+
+      function updateRelayOptions() {
+        for (const fieldset of channelConfigsContainer.querySelectorAll(".channel-config")) {
+          const number = Number(fieldset.dataset.channel);
+          channelConfigs[number - 1] = {
+            relay_mode: fieldset.querySelector(`[name="channel_${number}_mode"]`).value,
+            relay_state: fieldset.querySelector(`[name="channel_${number}_state"]`).value,
+            pulse_duration_ms: Number(
+              fieldset.querySelector(`[name="channel_${number}_pulse_duration_ms"]`).value
+            ),
+            last_pressed_at: fieldset.querySelector(
+              `[name="channel_${number}_last_pressed_at"]`
+            ).value || null
+          };
+        }
+        const isRelay = typeSelect.value === "relay";
+        const selectedType = deviceTypes.find((type) => type.id === typeSelect.value);
+        const channelCount = selectedType ? selectedType.channel_count || 0 : 0;
+        const isPulse = relayMode.value === "pulse";
+        relayOptions.hidden = !isRelay;
+        card.querySelector(".relay-state-field").hidden = !isRelay || isPulse;
+        card.querySelector(".pulse-duration-field").hidden = !isRelay || !isPulse;
+        multiRelayOptions.hidden = channelCount === 0;
+        channelConfigsContainer.replaceChildren();
+        for (let channelNumber = 1; channelNumber <= channelCount; channelNumber += 1) {
+          const channel = channelConfigs[channelNumber - 1] || {};
+          const pin = selectedType.channel_pins[channelNumber - 1];
+          const fieldset = createChannelConfig(channelNumber, pin, channel);
+          fieldset.dataset.channel = channelNumber;
+          const mode = fieldset.querySelector(`[name="channel_${channelNumber}_mode"]`).value;
+          fieldset.querySelector(`.channel-${channelNumber}-state-field`).hidden =
+            mode === "pulse";
+          fieldset.querySelector(`.channel-${channelNumber}-duration-field`).hidden =
+            mode !== "pulse";
+          channelConfigsContainer.append(fieldset);
+        }
+      }
+      typeSelect.addEventListener("change", updateRelayOptions);
+      relayMode.addEventListener("change", updateRelayOptions);
+      updateRelayOptions();
+      card.querySelector('[name="name"]').value = sensor.name || "";
+      card.querySelector('[name="room_name"]').value = sensor.room_name || "";
+      card.querySelector('[name="local_ip_address"]').value = sensor.local_ip_address || "";
+      card.querySelector(".remove").addEventListener("click", () => card.remove());
+      sensorList.append(card);
+    }
+
+    function addMonitoredDevice(device = {}) {
+      const card = document.createElement("fieldset");
+      card.className = "monitored-device";
+      card.innerHTML = `
+        <label>Server name<input name="name" required maxlength="100" value=""></label>
+        <label>Local IP address or URL<input name="address" required placeholder="192.168.1.50 or http://server.local" value=""></label>
+        <button class="remove" type="button">Remove</button>
+      `;
+      card.querySelector('[name="name"]').value = device.name || "";
+      card.querySelector('[name="address"]').value =
+        device.address || device.local_ip_address || "";
+      card.querySelector(".remove").addEventListener("click", () => card.remove());
+      monitoredDeviceList.append(card);
+    }
+
+    async function loadConfiguration() {
+      try {
+        const [configResponse, typesResponse] = await Promise.all([
+          fetch("/api/config", { cache: "no-store" }),
+          fetch("/api/device-types", { cache: "no-store" })
+        ]);
+        const [data, types] = await Promise.all([
+          configResponse.json(),
+          typesResponse.json()
+        ]);
+        if (!configResponse.ok) throw new Error(data.error || "Unable to load configuration.");
+        if (!typesResponse.ok) throw new Error(types.error || "Unable to load device types.");
+        deviceTypes = types.device_types;
+        data.sensors.forEach(addSensor);
+        (data.monitored_devices || []).forEach(addMonitoredDevice);
+      } catch (error) {
+        status.className = "status error";
+        status.textContent = `Could not load configuration: ${error.message}`;
+      }
+    }
+
+    document.querySelector("#add-sensor").addEventListener("click", () => addSensor());
+    document.querySelector("#add-monitored-device").addEventListener("click", () => addMonitoredDevice());
+    document.querySelector("#config-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const sensors = [...sensorList.querySelectorAll(".sensor")].map((card) => {
+        const sensor = {
+          device_type: card.querySelector('[name="device_type"]').value,
+          name: card.querySelector('[name="name"]').value.trim(),
+          room_name: card.querySelector('[name="room_name"]').value.trim(),
+          local_ip_address: card.querySelector('[name="local_ip_address"]').value.trim()
+        };
+        if (sensor.device_type === "relay") {
+          sensor.relay_mode = card.querySelector('[name="relay_mode"]').value;
+          sensor.relay_state = card.querySelector('[name="relay_state"]').value;
+          sensor.pulse_duration_ms = Number(
+            card.querySelector('[name="pulse_duration_ms"]').value
+          );
+          sensor.last_pressed_at =
+            card.querySelector('[name="last_pressed_at"]').value || null;
+        } else if (sensor.device_type !== "temperature_humidity" && sensor.device_type !== "relay") {
+          const selectedType = deviceTypes.find((type) => type.id === sensor.device_type);
+          sensor.channels = Array.from(
+            { length: selectedType.channel_count },
+            (_, index) => index + 1
+          ).map((channelNumber) => ({
+            relay_mode: card.querySelector(`[name="channel_${channelNumber}_mode"]`).value,
+            relay_state: card.querySelector(`[name="channel_${channelNumber}_state"]`).value,
+            pulse_duration_ms: Number(
+              card.querySelector(`[name="channel_${channelNumber}_pulse_duration_ms"]`).value
+            ),
+            last_pressed_at: card.querySelector(
+              `[name="channel_${channelNumber}_last_pressed_at"]`
+            ).value || null
+          }));
+        }
+        return sensor;
+      });
+      const monitoredDevices = [...monitoredDeviceList.querySelectorAll(".monitored-device")]
+        .map((card) => ({
+          name: card.querySelector('[name="name"]').value.trim(),
+          address: card.querySelector('[name="address"]').value.trim()
+        }));
+
+      try {
+        const response = await fetch("/api/config", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sensors, monitored_devices: monitoredDevices })
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Unable to save configuration.");
+        status.className = "status";
+        status.textContent = "Configuration saved.";
+      } catch (error) {
+        status.className = "status error";
+        status.textContent = `Could not save configuration: ${error.message}`;
+      }
+    });
+
+    loadConfiguration();
+  </script>
+</body>
+</html>

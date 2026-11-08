@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Home Dashboard</title>
+  <style>
+    :root { color-scheme: light; font-family: system-ui, sans-serif; color: #172033; background: #f3f6fb; }
+    body { margin: 0; }
+    .dashboard-layout { display: grid; grid-template-columns: 280px minmax(0, 1fr); min-height: 100vh; }
+    .server-panel { padding: 32px 20px; background: white; border-right: 1px solid #e1e7f0; }
+    .server-panel h2 { margin: 0 0 18px; font-size: 1.2rem; }
+    .server-list { display: grid; gap: 10px; }
+    .server-item { display: block; padding: 12px; border: 1px solid #e1e7f0; border-radius: 10px; color: inherit; text-decoration: none; }
+    .server-item:hover { border-color: #9aacc8; box-shadow: 0 3px 12px #17203312; }
+    .server-item:focus-visible { outline: 3px solid #2457c5; outline-offset: 2px; }
+    .server-name { margin: 0 0 5px; font-weight: 650; }
+    .server-address { color: #647086; font-size: .85rem; }
+    .server-status { display: flex; align-items: center; gap: 7px; margin-top: 8px; font-size: .9rem; font-weight: 600; }
+    .server-status::before { width: 9px; height: 9px; border-radius: 50%; background: #a4262c; content: ""; }
+    .server-status.available::before { background: #27864a; }
+    .server-empty { color: #647086; font-size: .9rem; }
+    main { max-width: 960px; width: 100%; box-sizing: border-box; margin: 0 auto; padding: 48px 24px; }
+    h1 { margin: 0; font-size: clamp(2rem, 5vw, 3rem); }
+    .intro { color: #596579; margin: 8px 0 28px; }
+    .notice { padding: 12px 16px; border-radius: 10px; background: #e7efff; color: #284b83; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 16px; margin-top: 24px; }
+    .card { background: white; border: 1px solid #e1e7f0; border-radius: 14px; padding: 20px; box-shadow: 0 4px 16px #1720330b; }
+    .room { color: #647086; margin: 4px 0 20px; }
+    .device-type { color: #2457c5; font-size: .85rem; font-weight: 600; margin: -14px 0 16px; }
+    .readings { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
+    .reading { font-size: 2.5rem; font-weight: 700; letter-spacing: -0.06em; }
+    .relay-button { padding: 10px 18px; border: 0; border-radius: 8px; background: #2457c5; color: white; font: inherit; font-weight: 700; cursor: pointer; }
+    .relay-button:hover { background: #1c469f; }
+    .relay-button.on { background: #c62828; }
+    .relay-button.on:hover { background: #a51f1f; }
+    .relay-button:disabled { cursor: wait; opacity: .65; }
+    .last-pressed { color: #647086; font-size: .9rem; }
+    .ip { color: #647086; font-size: .9rem; margin-top: 14px; }
+    .status { color: #647086; margin-top: 24px; font-size: .9rem; }
+    .error { color: #a4262c; }
+    .settings-link { position: fixed; right: 24px; bottom: 24px; padding: 12px 18px; border-radius: 999px; background: #2457c5; color: white; text-decoration: none; font-weight: 600; box-shadow: 0 4px 14px #17203333; }
+    .settings-link:hover { background: #1c469f; }
+    @media (max-width: 760px) {
+      .dashboard-layout { grid-template-columns: 1fr; }
+      .server-panel { border-right: 0; border-bottom: 1px solid #e1e7f0; padding: 20px 24px; }
+      .server-list { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+      main { padding: 32px 24px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="dashboard-layout">
+    <aside class="server-panel" aria-labelledby="server-heading">
+      <h2 id="server-heading">Local servers</h2>
+      <section id="servers" class="server-list" aria-live="polite"></section>
+    </aside>
+    <main>
+      <h1>Home Dashboard</h1>
+      <p class="intro">Live status for your configured sensors and modules.</p>
+      <p class="notice">Live readings are requested from each sensor on your local network.</p>
+      <section id="sensors" class="grid" aria-live="polite"></section>
+      <p id="status" class="status">Loading sensors…</p>
+    </main>
+  </div>
+  <a class="settings-link" href="/settings">Configuration</a>
+  <script>
+    const sensorGrid = document.querySelector("#sensors");
+    const serverList = document.querySelector("#servers");
+    const status = document.querySelector("#status");
+    let refreshTimer;
+
+    async function refreshSensors() {
+      window.clearTimeout(refreshTimer);
+      try {
+        const [sensorResponse, serverResponse] = await Promise.all([
+          fetch("/api/sensors", { cache: "no-store" }),
+          fetch("/api/servers", { cache: "no-store" })
+        ]);
+        const [data, serverData] = await Promise.all([
+          sensorResponse.json(),
+          serverResponse.json()
+        ]);
+        if (!sensorResponse.ok) throw new Error(data.error || "Unable to load sensors.");
+        if (!serverResponse.ok) throw new Error(serverData.error || "Unable to load monitored servers.");
+
+        serverList.replaceChildren();
+        if (serverData.servers.length === 0) {
+          const empty = document.createElement("p");
+          empty.className = "server-empty";
+          empty.textContent = "No monitored servers configured.";
+          serverList.append(empty);
+        }
+        for (const server of serverData.servers) {
+          const item = document.createElement("a");
+          item.className = "server-item";
+          item.href = server.address.toLowerCase().startsWith("http://")
+            || server.address.toLowerCase().startsWith("https://")
+            ? server.address
+            : `http://${server.address}`;
+          item.target = "_blank";
+          item.rel = "noopener noreferrer";
+          const name = document.createElement("p");
+          name.className = "server-name";
+          name.textContent = server.name;
+          const address = document.createElement("div");
+          address.className = "server-address";
+          address.textContent = server.address;
+          const availability = document.createElement("div");
+          availability.className = `server-status${server.status === "available" ? " available" : ""}`;
+          availability.textContent = server.status === "available" ? "Available" : "Offline";
+          if (server.error) availability.title = server.error;
+          item.append(name, address, availability);
+          serverList.append(item);
+        }
+
+        sensorGrid.replaceChildren();
+        for (const sensor of data.sensors) {
+          const card = document.createElement("article");
+          card.className = "card";
+
+          const name = document.createElement("h2");
+          name.textContent = sensor.name;
+          const room = document.createElement("p");
+          room.className = "room";
+          room.textContent = sensor.room_name;
+          const deviceType = document.createElement("p");
+          deviceType.className = "device-type";
+          deviceType.textContent = sensor.device_type_label;
+          const readings = document.createElement("div");
+          readings.className = "readings";
+          if (sensor.device_type === "temperature_humidity") {
+            const temperature = document.createElement("div");
+            temperature.className = "reading";
+            temperature.textContent = sensor.status === "online"
+              ? `${sensor.temperature} °C`
+              : "Offline";
+            const humidity = document.createElement("div");
+            humidity.className = "reading";
+            humidity.textContent = sensor.status === "online"
+              ? `${sensor.humidity}%`
+              : "—%";
+            readings.append(temperature, humidity);
+          }
+          const ip = document.createElement("p");
+          ip.className = "ip";
+          ip.textContent = `Local IP: ${sensor.local_ip_address}`;
+          if (sensor.error) {
+            ip.title = sensor.error;
+          }
+
+          card.append(name, room, deviceType, readings);
+          if (sensor.device_type === "relay" || Array.isArray(sensor.channels)) {
+            const isMultiChannel = Array.isArray(sensor.channels);
+            const channels = isMultiChannel
+              ? sensor.channels
+              : [{ ...sensor, channel: 1 }];
+            for (const channel of channels) {
+              const channelNumber = channel.channel;
+              const relayIsOn = channel.relay_state === "on";
+              const relayButton = document.createElement("button");
+              relayButton.type = "button";
+              relayButton.className = "relay-button";
+              relayButton.disabled = channel.status !== "online";
+              relayButton.classList.toggle("on", relayIsOn);
+              relayButton.textContent = channel.status !== "online"
+                ? `Channel ${channelNumber} offline`
+                : channel.relay_mode === "pulse"
+                  ? (relayIsOn ? `Channel ${channelNumber}: Turn off` : `Channel ${channelNumber}: Turn on (pulse)`)
+                  : (relayIsOn ? `Channel ${channelNumber}: Turn off` : `Channel ${channelNumber}: Turn on`);
+              relayButton.addEventListener("click", async () => {
+                relayButton.disabled = true;
+                try {
+                  const relayPath = isMultiChannel
+                    ? `/api/relay/${sensor.index}/${channelNumber}`
+                    : `/api/relay/${sensor.index}`;
+                  const response = await fetch(relayPath, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ action: "activate" })
+                  });
+                  const result = await response.json();
+                  if (!response.ok) throw new Error(result.error || "Relay command failed.");
+                  await refreshSensors();
+                } catch (error) {
+                  status.className = "status error";
+                  status.textContent = `Could not control ${sensor.name}, channel ${channelNumber}: ${error.message}`;
+                  relayButton.disabled = false;
+                }
+              });
+              const lastPressed = document.createElement("p");
+              lastPressed.className = "last-pressed";
+              lastPressed.textContent = channel.last_pressed_at
+                ? `Channel ${channelNumber} last pressed: ${new Date(channel.last_pressed_at).toLocaleString()}`
+                : "Last pressed: never";
+              card.append(relayButton, lastPressed);
+            }
+          }
+          card.append(ip);
+          sensorGrid.append(card);
+        }
+        status.className = "status";
+        const offlineCount = data.sensors.filter((sensor) => sensor.status === "offline").length;
+        status.textContent = `Updated ${new Date().toLocaleTimeString()}. Refreshes every 30 seconds.${offlineCount ? ` ${offlineCount} sensor(s) offline.` : ""}`;
+        const pulseActive = data.sensors.some((sensor) => {
+          const channels = sensor.device_type !== "relay" && sensor.channels
+            ? sensor.channels
+            : sensor.device_type === "relay"
+              ? [sensor]
+              : [];
+          return channels.some((channel) => channel.relay_mode === "pulse"
+            && channel.status === "online"
+            && channel.relay_state === "on");
+        });
+        refreshTimer = window.setTimeout(refreshSensors, pulseActive ? 500 : 30000);
+      } catch (error) {
+        status.className = "status error";
+        status.textContent = `Could not load sensors: ${error.message}`;
+        refreshTimer = window.setTimeout(refreshSensors, 30000);
+      }
+    }
+
+    refreshSensors();
+  </script>
+</body>
+</html>

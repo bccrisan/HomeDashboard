@@ -6,3 +6,4 @@ firmware/esp8266-1ch-relay/secrets.h
 firmware/esp8266-2ch-relay/secrets.h
 firmware/esp8266-4ch-relay/secrets.h
 firmware/esp8266-8ch-relay/secrets.h
+wifi-sensors.json

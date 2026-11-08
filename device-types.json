@@ -1,0 +1,28 @@
+{
+  "temperature_humidity": {
+    "label": "Temperature and humidity sensor",
+    "mode": "temperature_humidity"
+  },
+  "relay": {
+    "label": "1 Channel relay",
+    "mode": "relay"
+  },
+  "relay_2ch": {
+    "label": "2 Channel relay",
+    "mode": "relay_channels",
+    "channel_count": 2,
+    "channel_pins": ["D0", "D1"]
+  },
+  "relay_4ch": {
+    "label": "4 Channel relay",
+    "mode": "relay_channels",
+    "channel_count": 4,
+    "channel_pins": ["D0", "D1", "D2", "D5"]
+  },
+  "relay_8ch": {
+    "label": "8 Channel relay (74HC595N)",
+    "mode": "relay_channels",
+    "channel_count": 8,
+    "channel_pins": ["Q0", "Q1", "Q2", "Q3", "Q4", "Q5", "Q6", "Q7"]
+  }
+}
