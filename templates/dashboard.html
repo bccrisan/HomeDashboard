@@ -19,6 +19,17 @@
     .server-status { display: flex; align-items: center; gap: 7px; margin-top: 8px; font-size: .9rem; font-weight: 600; }
     .server-status::before { width: 9px; height: 9px; border-radius: 50%; background: #a4262c; content: ""; }
     .server-status.available::before { background: #27864a; }
+    .power-monitor-row { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-top: 9px; }
+    .power-led-status { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; color: #647086; font-size: .8rem; }
+    .power-led { display: inline-flex; align-items: center; gap: 5px; }
+    .power-led::before { width: 9px; height: 9px; border-radius: 50%; background: #8a94a6; content: ""; }
+    .power-led.on::before { background: #27864a; box-shadow: 0 0 7px #27864a88; }
+    .power-led.hdd-on::before { background: #d97706; box-shadow: 0 0 7px #d9770688; }
+    .power-controls { display: flex; flex-shrink: 0; gap: 7px; }
+    .power-button { padding: 6px 9px; border: 0; border-radius: 6px; background: #2457c5; color: white; font: inherit; font-size: .8rem; font-weight: 600; cursor: pointer; }
+    .power-button.restart { background: #a4262c; }
+    .power-button:disabled { cursor: wait; opacity: .55; }
+    .power-button:focus-visible { outline: 3px solid #2457c5; outline-offset: 2px; }
     .server-empty { color: #647086; font-size: .9rem; }
     main { max-width: 960px; width: 100%; box-sizing: border-box; margin: 0 auto; padding: 48px 24px; }
     h1 { margin: 0; font-size: clamp(2rem, 5vw, 3rem); }
@@ -92,25 +103,107 @@
           serverList.append(empty);
         }
         for (const server of serverData.servers) {
-          const item = document.createElement("a");
+          const item = document.createElement("article");
           item.className = "server-item";
-          item.href = server.address.toLowerCase().startsWith("http://")
+          const addressLink = document.createElement("a");
+          addressLink.className = "server-address";
+          addressLink.href = server.address.toLowerCase().startsWith("http://")
             || server.address.toLowerCase().startsWith("https://")
             ? server.address
             : `http://${server.address}`;
-          item.target = "_blank";
-          item.rel = "noopener noreferrer";
+          addressLink.target = "_blank";
+          addressLink.rel = "noopener noreferrer";
           const name = document.createElement("p");
           name.className = "server-name";
           name.textContent = server.name;
-          const address = document.createElement("div");
-          address.className = "server-address";
-          address.textContent = server.address;
+          addressLink.textContent = server.address;
           const availability = document.createElement("div");
           availability.className = `server-status${server.status === "available" ? " available" : ""}`;
           availability.textContent = server.status === "available" ? "Available" : "Offline";
           if (server.error) availability.title = server.error;
-          item.append(name, address, availability);
+          item.append(name, addressLink, availability);
+          if (server.power_monitor) {
+            const monitor = server.power_monitor_status || { status: "offline" };
+            const monitorRow = document.createElement("div");
+            monitorRow.className = "power-monitor-row";
+            const ledStatus = document.createElement("div");
+            ledStatus.className = "power-led-status";
+            ledStatus.setAttribute("aria-label", "PC power status LEDs");
+            for (const [label, key, ledClass] of [
+              ["Power", "power_led", ""],
+              ["HDD", "hdd_led", "hdd-on"]
+            ]) {
+              const indicator = document.createElement("span");
+              const isOn = monitor.status === "online" && monitor[key] === true;
+              indicator.className = `power-led${isOn ? ` on ${ledClass}` : ""}`;
+              indicator.textContent = `${label}: ${
+                monitor.status !== "online" ? "Unknown" : isOn ? "On" : "Off"
+              }`;
+              if (monitor.status !== "online" && monitor.error) {
+                indicator.title = `Power monitor unavailable: ${monitor.error}`;
+              }
+              ledStatus.append(indicator);
+            }
+            if (monitor.status === "online") {
+              const activity = document.createElement("span");
+              activity.textContent = `HDD activity: ${monitor.hdd_activity_count}`;
+              ledStatus.append(activity);
+            }
+            monitorRow.append(ledStatus);
+
+            const controls = document.createElement("div");
+            controls.className = "power-controls";
+            controls.setAttribute("aria-label", `${server.name} power controls`);
+            for (const [action, label, disabled] of [
+              ["start", "Start", monitor.status !== "online" || monitor.power_led],
+              ["restart", "Restart", monitor.status !== "online" || !monitor.power_led]
+            ]) {
+              const button = document.createElement("button");
+              button.className = `power-button${action === "restart" ? " restart" : ""}`;
+              button.type = "button";
+              button.textContent = label;
+              button.disabled = disabled;
+              button.title = disabled
+                ? monitor.status !== "online"
+                  ? "Power monitor is unavailable."
+                  : action === "start"
+                    ? "The PC is already powered on."
+                    : "The PC appears to be powered off."
+                : "";
+              button.addEventListener("click", async () => {
+                if (action === "restart"
+                    && !window.confirm(`Restart ${server.name} now? This performs a hardware reset.`)) {
+                  return;
+                }
+
+                controls.querySelectorAll("button").forEach((control) => {
+                  control.disabled = true;
+                });
+                status.className = "status";
+                status.textContent = `${label} command sent to ${server.name}…`;
+                try {
+                  const response = await fetch(
+                    `/api/pc/${server.index}/${action}`,
+                    { method: "POST" }
+                  );
+                  const result = await response.json();
+                  if (!response.ok) {
+                    throw new Error(result.error || `${label} command failed.`);
+                  }
+                  await refreshSensors();
+                } catch (error) {
+                  status.className = "status error";
+                  status.textContent = `Could not ${action} ${server.name}: ${error.message}`;
+                  controls.querySelectorAll("button").forEach((control) => {
+                    control.disabled = false;
+                  });
+                }
+              });
+              controls.append(button);
+            }
+            monitorRow.append(controls);
+            item.append(monitorRow);
+          }
           serverList.append(item);
         }
 

@@ -19,6 +19,9 @@
     .monitored-device { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; padding: 20px; background: white; border: 1px solid #e1e7f0; border-radius: 14px; }
     label { display: grid; gap: 6px; color: #596579; font-size: .9rem; }
     input, select { box-sizing: border-box; width: 100%; padding: 10px 12px; border: 1px solid #cbd4e1; border-radius: 8px; color: #172033; background: white; font: inherit; }
+    .power-monitor-option { display: flex; align-items: center; gap: 9px; grid-column: 1 / -1; }
+    .power-monitor-option input { width: auto; }
+    .power-monitor-address[hidden] { display: none; }
     .relay-options { display: contents; }
     .relay-options[hidden] { display: none; }
     .relay-state-field[hidden], .pulse-duration-field[hidden] { display: none; }
@@ -51,7 +54,7 @@
         <button type="submit">Save configuration</button>
       </div>
       <h2 class="section-heading">Monitored devices</h2>
-      <p class="section-intro">Track whether local servers respond to ping or their configured HTTP URL. These devices are separate from sensors and relays.</p>
+      <p class="section-intro">Track whether local servers respond to ping or their configured HTTP URL. Optionally enable ATX power and HDD LED monitoring for a server with the ESP32-ETH01 power controller.</p>
       <section id="monitored-device-list" class="monitored-device-list"></section>
       <div class="actions">
         <button id="add-monitored-device" type="button">Add monitored server</button>
@@ -217,11 +220,26 @@
       card.innerHTML = `
         <label>Server name<input name="name" required maxlength="100" value=""></label>
         <label>Local IP address or URL<input name="address" required placeholder="192.168.1.50 or http://server.local" value=""></label>
+        <label class="power-monitor-option"><input name="power_monitor" type="checkbox"> Enable ATX power and HDD LED monitor</label>
+        <label class="power-monitor-address" hidden>ATX power monitor IP address<input name="power_monitor_address" type="text" inputmode="decimal" placeholder="192.168.1.60" autocomplete="off"></label>
         <button class="remove" type="button">Remove</button>
       `;
       card.querySelector('[name="name"]').value = device.name || "";
       card.querySelector('[name="address"]').value =
         device.address || device.local_ip_address || "";
+      card.querySelector('[name="power_monitor"]').checked =
+        device.power_monitor === true;
+      const powerMonitorCheckbox = card.querySelector('[name="power_monitor"]');
+      const powerMonitorAddress = card.querySelector(".power-monitor-address");
+      const powerMonitorAddressInput =
+        card.querySelector('[name="power_monitor_address"]');
+      powerMonitorAddressInput.value = device.power_monitor_address || "";
+      function updatePowerMonitorAddress() {
+        powerMonitorAddress.hidden = !powerMonitorCheckbox.checked;
+        powerMonitorAddressInput.required = powerMonitorCheckbox.checked;
+      }
+      powerMonitorCheckbox.addEventListener("change", updatePowerMonitorAddress);
+      updatePowerMonitorAddress();
       card.querySelector(".remove").addEventListener("click", () => card.remove());
       monitoredDeviceList.append(card);
     }
@@ -287,7 +305,12 @@
       const monitoredDevices = [...monitoredDeviceList.querySelectorAll(".monitored-device")]
         .map((card) => ({
           name: card.querySelector('[name="name"]').value.trim(),
-          address: card.querySelector('[name="address"]').value.trim()
+          address: card.querySelector('[name="address"]').value.trim(),
+          power_monitor: card.querySelector('[name="power_monitor"]').checked,
+          power_monitor_address:
+            card.querySelector('[name="power_monitor"]').checked
+              ? card.querySelector('[name="power_monitor_address"]').value.trim()
+              : ""
         }));
 
       try {

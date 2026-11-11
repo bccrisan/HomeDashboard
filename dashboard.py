@@ -18,6 +18,7 @@ CONFIG_PATH = Path(__file__).with_name("wifi-sensors.json")
 DEVICE_TYPES_PATH = Path(__file__).with_name("device-types.json")
 DEFAULT_DEVICE_TYPE = "temperature_humidity"
 RELAY_ROUTE_PREFIX = "/api/relay/"
+PC_COMMAND_ROUTE_PREFIX = "/api/pc/"
 
 
 def load_device_types():
@@ -62,6 +63,12 @@ DEVICE_TYPES = load_device_types()
 
 class RelayCommunicationError(Exception):
     pass
+
+
+class PowerMonitorCommandError(Exception):
+    def __init__(self, message, status_code=502):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class NoRedirectHandler(HTTPRedirectHandler):
@@ -224,7 +231,7 @@ def validate_sensors(sensors):
     return validated
 
 
-def validate_monitored_devices(devices):
+def validate_monitored_devices(devices, require_power_monitor_address=False):
     if not isinstance(devices, list):
         raise ValueError("'monitored_devices' must be an array.")
     if len(devices) > 100:
@@ -254,6 +261,38 @@ def validate_monitored_devices(devices):
             raise ValueError(
                 f"Monitored device address at index {index} is invalid or too long."
             )
+        power_monitor = device.get("power_monitor", False)
+        if not isinstance(power_monitor, bool):
+            raise ValueError(
+                f"Monitored device at index {index} 'power_monitor' must be a boolean."
+            )
+        power_monitor_address = device.get("power_monitor_address")
+        if power_monitor and power_monitor_address is None:
+            if require_power_monitor_address:
+                raise ValueError(
+                    f"Monitored device at index {index} must have a "
+                    "'power_monitor_address' when power monitoring is enabled."
+                )
+        elif power_monitor:
+            if not isinstance(power_monitor_address, str):
+                raise ValueError(
+                    f"Monitored device at index {index} 'power_monitor_address' "
+                    "must be a private IPv4 address."
+                )
+            try:
+                parsed_monitor_address = ipaddress.IPv4Address(
+                    power_monitor_address.strip()
+                )
+            except ipaddress.AddressValueError as exc:
+                raise ValueError(
+                    f"Monitored device at index {index} 'power_monitor_address' "
+                    "must be a private IPv4 address."
+                ) from exc
+            if not parsed_monitor_address.is_private:
+                raise ValueError(
+                    f"Monitored device at index {index} 'power_monitor_address' "
+                    "must be a private IPv4 address."
+                )
         try:
             parsed_address = ipaddress.IPv4Address(address)
         except ipaddress.AddressValueError:
@@ -292,11 +331,18 @@ def validate_monitored_devices(devices):
                     f"Monitored device URL at index {index} must use a private IP address."
                 )
             normalized_address = address
-        validated.append({"name": name, "address": normalized_address})
+        validated_device = {
+            "name": name,
+            "address": normalized_address,
+            "power_monitor": power_monitor,
+        }
+        if power_monitor and power_monitor_address is not None:
+            validated_device["power_monitor_address"] = str(parsed_monitor_address)
+        validated.append(validated_device)
     return validated
 
 
-def read_monitored_device(device):
+def read_monitored_device_availability(device):
     address = device["address"]
     try:
         parsed_address = ipaddress.IPv4Address(address)
@@ -350,6 +396,135 @@ def read_monitored_device(device):
         **device,
         "status": "available" if result.returncode == 0 else "offline",
     }
+
+
+def read_power_monitor_status(device):
+    address = device.get("power_monitor_address", device["address"])
+    try:
+        parsed_address = ipaddress.IPv4Address(address)
+    except ipaddress.AddressValueError:
+        parsed_address = None
+
+    if parsed_address is not None:
+        status_url = f"http://{parsed_address}/api/pc/status"
+    else:
+        parsed_url = urlsplit(address)
+        port = parsed_url.port or (443 if parsed_url.scheme == "https" else 80)
+        resolved_addresses = {
+            ipaddress.ip_address(result[4][0].split("%", 1)[0])
+            for result in socket.getaddrinfo(
+                parsed_url.hostname,
+                port,
+                type=socket.SOCK_STREAM,
+            )
+        }
+        if not resolved_addresses or any(
+            not resolved_address.is_private
+            for resolved_address in resolved_addresses
+        ):
+            raise ValueError("URL does not resolve exclusively to private addresses.")
+        status_url = f"{parsed_url.scheme}://{parsed_url.netloc}/api/pc/status"
+
+    with urlopen(status_url, timeout=2) as response:
+        reading = json.load(response)
+    if (
+        not isinstance(reading, dict)
+        or not isinstance(reading.get("power_led"), bool)
+        or not isinstance(reading.get("hdd_led"), bool)
+        or isinstance(reading.get("hdd_activity_count"), bool)
+        or not isinstance(reading.get("hdd_activity_count"), int)
+        or reading["hdd_activity_count"] < 0
+    ):
+        raise ValueError("Power monitor returned an invalid status.")
+    return {
+        "status": "online",
+        "power_led": reading["power_led"],
+        "hdd_led": reading["hdd_led"],
+        "hdd_activity_count": reading["hdd_activity_count"],
+    }
+
+
+def execute_power_monitor_command(index, action):
+    devices = load_configuration()["monitored_devices"]
+    if index < 0 or index >= len(devices):
+        raise ValueError("Monitored device was not found.")
+    device = devices[index]
+    if not device["power_monitor"]:
+        raise ValueError("Power monitoring is not enabled for this device.")
+    if action not in ("start", "restart"):
+        raise ValueError("Power action must be 'start' or 'restart'.")
+
+    try:
+        status = read_power_monitor_status(device)
+    except (HTTPError, URLError, TimeoutError, OSError, ValueError) as exc:
+        raise PowerMonitorCommandError(
+            f"Could not read the ATX power monitor before sending command: {exc}"
+        ) from exc
+
+    if action == "start" and status["power_led"]:
+        raise PowerMonitorCommandError(
+            "The PC is already powered on; start command was not sent.", 409
+        )
+    if action == "restart" and not status["power_led"]:
+        raise PowerMonitorCommandError(
+            "The PC appears to be powered off; restart command was not sent.", 409
+        )
+
+    command = "power" if action == "start" else "reset"
+    address = device.get("power_monitor_address", device["address"])
+    try:
+        parsed_address = ipaddress.IPv4Address(address)
+    except ipaddress.AddressValueError:
+        parsed_address = None
+
+    if parsed_address is not None:
+        command_url = f"http://{parsed_address}/api/pc/{command}"
+    else:
+        parsed_url = urlsplit(address)
+        command_url = f"{parsed_url.scheme}://{parsed_url.netloc}/api/pc/{command}"
+
+    request = Request(command_url, data=b"", method="POST")
+    try:
+        with urlopen(request, timeout=3) as response:
+            result = json.load(response)
+            status_code = response.status
+    except HTTPError as exc:
+        try:
+            response = json.load(exc)
+            message = response.get("error") if isinstance(response, dict) else None
+        except (json.JSONDecodeError, OSError):
+            message = None
+        raise PowerMonitorCommandError(
+            message or f"ATX controller returned HTTP {exc.code}.",
+            409 if exc.code == 409 else 502,
+        ) from exc
+    except (URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+        raise PowerMonitorCommandError(
+            f"Could not send command to ATX controller: {exc}"
+        ) from exc
+
+    if (
+        status_code != 202
+        or not isinstance(result, dict)
+        or result.get("command") != command
+        or isinstance(result.get("pulse_ms"), bool)
+        or not isinstance(result.get("pulse_ms"), int)
+        or result["pulse_ms"] <= 0
+    ):
+        raise PowerMonitorCommandError("ATX controller returned an invalid command response.")
+    return {"action": action, "pulse_ms": result["pulse_ms"]}
+
+
+def read_monitored_device(device):
+    result = read_monitored_device_availability(device)
+    if not device["power_monitor"]:
+        return result
+
+    try:
+        power_monitor = read_power_monitor_status(device)
+    except (HTTPError, URLError, TimeoutError, OSError, ValueError) as exc:
+        power_monitor = {"status": "offline", "error": str(exc)}
+    return {**result, "power_monitor_status": power_monitor}
 
 
 def read_sensor(sensor):
@@ -589,7 +764,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             try:
                 devices = load_configuration()["monitored_devices"]
                 with ThreadPoolExecutor(max_workers=min(16, len(devices) or 1)) as executor:
-                    servers = list(executor.map(read_monitored_device, devices))
+                    servers = [
+                        {**server, "index": index}
+                        for index, server in enumerate(
+                            executor.map(read_monitored_device, devices)
+                        )
+                    ]
                 body = json.dumps({"servers": servers})
             except (RuntimeError, ValueError) as exc:
                 body = json.dumps({"error": str(exc)})
@@ -628,6 +808,43 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlsplit(self.path).path
+        if path.startswith(PC_COMMAND_ROUTE_PREFIX):
+            route_parts = path[len(PC_COMMAND_ROUTE_PREFIX):].split("/")
+            if (
+                len(route_parts) != 2
+                or not route_parts[0].isdecimal()
+                or route_parts[1] not in ("start", "restart")
+            ):
+                self.respond(404, "text/plain; charset=utf-8", "Not found")
+                return
+
+            try:
+                result = execute_power_monitor_command(
+                    int(route_parts[0]),
+                    route_parts[1],
+                )
+            except ValueError as exc:
+                self.respond(
+                    400,
+                    "application/json; charset=utf-8",
+                    json.dumps({"error": str(exc)}),
+                )
+                return
+            except PowerMonitorCommandError as exc:
+                self.respond(
+                    exc.status_code,
+                    "application/json; charset=utf-8",
+                    json.dumps({"error": str(exc)}),
+                )
+                return
+
+            self.respond(
+                202,
+                "application/json; charset=utf-8",
+                json.dumps(result),
+            )
+            return
+
         if path.startswith(RELAY_ROUTE_PREFIX):
             if self.headers.get_content_type() != "application/json":
                 self.respond(
@@ -710,7 +927,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 raise ValueError("Request body must be a JSON object.")
             sensors = validate_sensors(payload.get("sensors"))
             monitored_devices = (
-                validate_monitored_devices(payload["monitored_devices"])
+                validate_monitored_devices(
+                    payload["monitored_devices"],
+                    require_power_monitor_address=True,
+                )
                 if "monitored_devices" in payload
                 else load_configuration()["monitored_devices"]
             )
